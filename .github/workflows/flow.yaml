@@ -33,11 +33,21 @@ jobs:
 
       - name: Check index.html
         run: |
-          test -f index.html
+          echo "======================================"
+          echo "Checking index.html"
+          echo "======================================"
+
+          if [ ! -f index.html ]; then
+            echo "ERROR: index.html not found!"
+            exit 1
+          fi
+
           echo "index.html found."
 
       - name: Validate HTML
         run: |
+          echo "Validating HTML..."
+
           grep -qi "<!DOCTYPE html>" index.html
           grep -qi "<html" index.html
           grep -qi "<head" index.html
@@ -48,7 +58,7 @@ jobs:
 
 
   # ============================================================
-  # BUILD + PUSH
+  # BUILD + PUSH DOCKER IMAGE
   # ============================================================
 
   build:
@@ -84,17 +94,10 @@ jobs:
           CMD ["nginx", "-g", "daemon off;"]
           EOF
 
-      # --------------------------------------------------------
-      # Docker information
-      # --------------------------------------------------------
-
-      - name: Docker version
-        run: |
-          docker --version
-          docker info
+          echo "Dockerfile created."
 
       # --------------------------------------------------------
-      # Docker Hub login
+      # Docker Login
       # --------------------------------------------------------
 
       - name: Login to Docker Hub
@@ -103,12 +106,12 @@ jobs:
           DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
         run: |
           if [ -z "$DOCKER_USERNAME" ]; then
-            echo "DOCKERHUB_USERNAME is empty"
+            echo "ERROR: DOCKERHUB_USERNAME is empty"
             exit 1
           fi
 
           if [ -z "$DOCKER_PASSWORD" ]; then
-            echo "DOCKERHUB_PASSWORD is empty"
+            echo "ERROR: DOCKERHUB_PASSWORD is empty"
             exit 1
           fi
 
@@ -122,7 +125,7 @@ jobs:
           echo "Docker Hub login successful."
 
       # --------------------------------------------------------
-      # Build
+      # Build Image
       # --------------------------------------------------------
 
       - name: Build Docker image
@@ -132,44 +135,50 @@ jobs:
             -t "$IMAGE_NAME:${GITHUB_SHA::7}" \
             .
 
-          echo "Docker image built."
+          echo "Docker image built successfully."
 
       # --------------------------------------------------------
-      # Test container
+      # Test Container
       # --------------------------------------------------------
 
       - name: Test Docker image
         run: |
+
           docker run -d \
             --name nova-test \
             -p 8080:80 \
             "$IMAGE_NAME:latest"
 
+          echo "Waiting for Nginx..."
           sleep 5
 
           curl --fail http://localhost:8080
 
           echo ""
-          echo "Docker container test successful."
+          echo "Application test successful."
 
           docker stop nova-test
           docker rm nova-test
 
       # --------------------------------------------------------
-      # Push latest
+      # Push Latest
       # --------------------------------------------------------
 
       - name: Push latest image
         run: |
           docker push "$IMAGE_NAME:latest"
 
+          echo "Latest image pushed."
+
       # --------------------------------------------------------
-      # Push version
+      # Push Version
       # --------------------------------------------------------
 
       - name: Push versioned image
         run: |
           docker push "$IMAGE_NAME:${GITHUB_SHA::7}"
+
+          echo "Versioned image pushed."
 
       # --------------------------------------------------------
       # Logout
@@ -181,7 +190,7 @@ jobs:
 
 
   # ============================================================
-  # DEPLOY TO EC2
+  # CD - DEPLOY TO EC2
   # ============================================================
 
   deploy:
@@ -196,8 +205,13 @@ jobs:
         with:
           node-version: 24
 
+      # ========================================================
+      # SSH DEPLOYMENT
+      # ========================================================
+
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.2
+
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
@@ -208,88 +222,239 @@ jobs:
 
             set -e
 
-            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/nova-ai:latest"
-            CONTAINER="nova-ai"
-
             echo "======================================"
             echo "NOVA AI DEPLOYMENT"
             echo "======================================"
 
-            # --------------------------------------------------
-            # Docker check
-            # --------------------------------------------------
+            # ==================================================
+            # DETECT OPERATING SYSTEM
+            # ==================================================
 
+            echo ""
+            echo "Detecting operating system..."
+
+            if [ -f /etc/os-release ]; then
+              . /etc/os-release
+
+              echo "OS: $NAME"
+              echo "VERSION: $VERSION"
+            else
+              echo "ERROR: Cannot detect operating system."
+              exit 1
+            fi
+
+
+            # ==================================================
+            # CHECK / INSTALL DOCKER
+            # ==================================================
+
+            echo ""
+            echo "Checking Docker..."
+
+            if command -v docker >/dev/null 2>&1; then
+
+              echo "Docker is already installed."
+              docker --version
+
+            else
+
+              echo "Docker is not installed."
+              echo "Installing Docker..."
+
+              # ----------------------------------------------
+              # Ubuntu / Debian
+              # ----------------------------------------------
+
+              if command -v apt-get >/dev/null 2>&1; then
+
+                echo "Detected Debian/Ubuntu."
+
+                sudo apt-get update
+
+                sudo apt-get install -y docker.io
+
+                sudo systemctl enable docker
+                sudo systemctl start docker
+
+              # ----------------------------------------------
+              # Amazon Linux / RHEL / CentOS
+              # ----------------------------------------------
+
+              elif command -v dnf >/dev/null 2>&1; then
+
+                echo "Detected dnf-based system."
+
+                sudo dnf install -y docker
+
+                sudo systemctl enable docker
+                sudo systemctl start docker
+
+              elif command -v yum >/dev/null 2>&1; then
+
+                echo "Detected yum-based system."
+
+                sudo yum install -y docker
+
+                sudo systemctl enable docker
+                sudo systemctl start docker
+
+              else
+
+                echo "ERROR: Unsupported Linux distribution."
+                exit 1
+
+              fi
+
+              echo "Docker installation completed."
+
+            fi
+
+
+            # ==================================================
+            # ENSURE DOCKER SERVICE IS RUNNING
+            # ==================================================
+
+            echo ""
+            echo "Starting Docker service..."
+
+            sudo systemctl enable docker || true
+            sudo systemctl start docker
+
+            sleep 3
+
+            echo ""
             echo "Docker version:"
+
             docker --version
 
-            # --------------------------------------------------
-            # Login Docker Hub
-            # --------------------------------------------------
 
+            # ==================================================
+            # DOCKER PERMISSION
+            # ==================================================
+
+            echo ""
+            echo "Checking Docker permissions..."
+
+            if docker ps >/dev/null 2>&1; then
+
+              echo "Docker works without sudo."
+
+            else
+
+              echo "Adding current user to Docker group..."
+
+              sudo usermod -aG docker "$USER" || true
+
+              # Refresh group for this SSH session
+              if command -v newgrp >/dev/null 2>&1; then
+                echo "Refreshing Docker group..."
+              fi
+
+            fi
+
+
+            # ==================================================
+            # DOCKER HUB LOGIN
+            # ==================================================
+
+            echo ""
             echo "Logging into Docker Hub..."
 
             printf '%s' '${{ secrets.DOCKERHUB_PASSWORD }}' | \
-              docker login docker.io \
+              sudo docker login docker.io \
               --username '${{ secrets.DOCKERHUB_USERNAME }}' \
               --password-stdin
 
             echo "Docker Hub login successful."
 
-            # --------------------------------------------------
-            # Pull latest image
-            # --------------------------------------------------
 
-            echo "Pulling image:"
-            echo "$IMAGE"
+            # ==================================================
+            # CONFIGURATION
+            # ==================================================
 
-            docker pull "$IMAGE"
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/nova-ai:latest"
+            CONTAINER="nova-ai"
 
-            # --------------------------------------------------
-            # Stop old container
-            # --------------------------------------------------
+            echo ""
+            echo "Image: $IMAGE"
+            echo "Container: $CONTAINER"
 
+
+            # ==================================================
+            # PULL IMAGE
+            # ==================================================
+
+            echo ""
+            echo "Pulling latest Docker image..."
+
+            sudo docker pull "$IMAGE"
+
+            echo "Image pulled successfully."
+
+
+            # ==================================================
+            # STOP OLD CONTAINER
+            # ==================================================
+
+            echo ""
             echo "Stopping old container..."
 
-            docker stop "$CONTAINER" 2>/dev/null || true
+            sudo docker stop "$CONTAINER" 2>/dev/null || true
 
-            # --------------------------------------------------
-            # Remove old container
-            # --------------------------------------------------
 
+            # ==================================================
+            # REMOVE OLD CONTAINER
+            # ==================================================
+
+            echo ""
             echo "Removing old container..."
 
-            docker rm "$CONTAINER" 2>/dev/null || true
+            sudo docker rm "$CONTAINER" 2>/dev/null || true
 
-            # --------------------------------------------------
-            # Start new container
-            # --------------------------------------------------
 
+            # ==================================================
+            # START NEW CONTAINER
+            # ==================================================
+
+            echo ""
             echo "Starting new container..."
 
-            docker run -d \
+            sudo docker run -d \
               --name "$CONTAINER" \
               --restart unless-stopped \
               -p 80:80 \
               "$IMAGE"
 
-            # --------------------------------------------------
-            # Wait
-            # --------------------------------------------------
+            echo "New container started."
 
+
+            # ==================================================
+            # WAIT FOR NGINX
+            # ==================================================
+
+            echo ""
             echo "Waiting for Nginx..."
 
             sleep 5
 
-            # --------------------------------------------------
-            # Container check
-            # --------------------------------------------------
 
-            if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+            # ==================================================
+            # CHECK CONTAINER
+            # ==================================================
+
+            echo ""
+            echo "Checking container..."
+
+            if ! sudo docker ps \
+              --format '{{.Names}}' | \
+              grep -q "^${CONTAINER}$"; then
 
               echo "ERROR: Container failed to start."
 
+              echo ""
               echo "Container logs:"
-              docker logs "$CONTAINER" || true
+
+              sudo docker logs "$CONTAINER" || true
 
               exit 1
 
@@ -297,10 +462,12 @@ jobs:
 
             echo "Container is running."
 
-            # --------------------------------------------------
-            # Application test
-            # --------------------------------------------------
 
+            # ==================================================
+            # TEST APPLICATION
+            # ==================================================
+
+            echo ""
             echo "Testing application..."
 
             curl --fail http://localhost
@@ -308,21 +475,40 @@ jobs:
             echo ""
             echo "NOVA AI is responding successfully."
 
-            # --------------------------------------------------
-            # Cleanup
-            # --------------------------------------------------
 
-            docker image prune -f
+            # ==================================================
+            # CLEAN OLD IMAGES
+            # ==================================================
 
-            # --------------------------------------------------
-            # Logout
-            # --------------------------------------------------
+            echo ""
+            echo "Cleaning unused Docker images..."
 
-            docker logout docker.io || true
+            sudo docker image prune -f
+
+
+            # ==================================================
+            # LOGOUT
+            # ==================================================
+
+            echo ""
+            echo "Logging out of Docker Hub..."
+
+            sudo docker logout docker.io || true
+
+
+            # ==================================================
+            # FINAL STATUS
+            # ==================================================
 
             echo ""
             echo "======================================"
-            echo "DEPLOYMENT SUCCESSFUL"
+            echo "NOVA AI DEPLOYMENT SUCCESSFUL"
             echo "======================================"
 
-            docker ps
+            echo ""
+            echo "Running containers:"
+
+            sudo docker ps
+
+            echo ""
+            echo "Deployment completed successfully."
