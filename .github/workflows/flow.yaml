@@ -14,37 +14,30 @@ env:
 jobs:
 
   # ============================================================
-  # CI - TEST APPLICATION
+  # CI - TEST
   # ============================================================
 
   test:
     name: Test Application
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
 
-      - name: Checkout source code
+      - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
       - name: Check index.html
         run: |
-          echo "======================================"
-          echo "Checking index.html"
-          echo "======================================"
-
-          if [ ! -f index.html ]; then
-            echo "ERROR: index.html not found!"
-            exit 1
-          fi
-
+          test -f index.html
           echo "index.html found."
 
       - name: Validate HTML
         run: |
-          echo "======================================"
-          echo "Validating HTML"
-          echo "======================================"
-
           grep -qi "<!DOCTYPE html>" index.html
           grep -qi "<html" index.html
           grep -qi "<head" index.html
@@ -55,18 +48,23 @@ jobs:
 
 
   # ============================================================
-  # CI - BUILD AND PUSH DOCKER IMAGE
+  # BUILD + PUSH
   # ============================================================
 
   build:
     name: Build and Push Docker Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: test
 
     steps:
 
-      - name: Checkout source code
+      - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
       # --------------------------------------------------------
       # Create Dockerfile
@@ -86,150 +84,120 @@ jobs:
           CMD ["nginx", "-g", "daemon off;"]
           EOF
 
-          echo "Dockerfile created."
-
       # --------------------------------------------------------
-      # Display Dockerfile
+      # Docker information
       # --------------------------------------------------------
 
-      - name: Display Dockerfile
+      - name: Docker version
         run: |
-          echo "======================================"
-          echo "Dockerfile"
-          echo "======================================"
-
-          cat Dockerfile
+          docker --version
+          docker info
 
       # --------------------------------------------------------
-      # Verify Docker Hub Secrets
+      # Docker Hub login
       # --------------------------------------------------------
 
-      - name: Verify Docker Hub secrets
+      - name: Login to Docker Hub
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
         run: |
-          echo "======================================"
-          echo "Checking Docker Hub credentials"
-          echo "======================================"
-
           if [ -z "$DOCKER_USERNAME" ]; then
-            echo "ERROR: DOCKERHUB_USERNAME is empty"
+            echo "DOCKERHUB_USERNAME is empty"
             exit 1
           fi
 
           if [ -z "$DOCKER_PASSWORD" ]; then
-            echo "ERROR: DOCKERHUB_PASSWORD is empty"
+            echo "DOCKERHUB_PASSWORD is empty"
             exit 1
           fi
 
-          echo "Docker Hub username configured."
-          echo "Docker Hub token configured."
-          echo "Token length: ${#DOCKER_PASSWORD}"
+          echo "Logging into Docker Hub..."
+
+          printf '%s' "$DOCKER_PASSWORD" | \
+            docker login docker.io \
+            --username "$DOCKER_USERNAME" \
+            --password-stdin
+
+          echo "Docker Hub login successful."
 
       # --------------------------------------------------------
-      # Login Docker Hub
-      # --------------------------------------------------------
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-      # --------------------------------------------------------
-      # Build Docker Image
+      # Build
       # --------------------------------------------------------
 
       - name: Build Docker image
         run: |
-          echo "======================================"
-          echo "Building Docker image"
-          echo "======================================"
-
           docker build \
-            -t $IMAGE_NAME:latest \
-            -t $IMAGE_NAME:${GITHUB_SHA::7} \
+            -t "$IMAGE_NAME:latest" \
+            -t "$IMAGE_NAME:${GITHUB_SHA::7}" \
             .
 
-          echo "Docker image built successfully."
+          echo "Docker image built."
 
       # --------------------------------------------------------
-      # Test Docker Image
+      # Test container
       # --------------------------------------------------------
 
       - name: Test Docker image
         run: |
-          echo "======================================"
-          echo "Testing Docker container"
-          echo "======================================"
-
           docker run -d \
             --name nova-test \
             -p 8080:80 \
-            $IMAGE_NAME:latest
+            "$IMAGE_NAME:latest"
 
-          echo "Waiting for Nginx..."
           sleep 5
-
-          echo "Testing application..."
 
           curl --fail http://localhost:8080
 
           echo ""
-          echo "Application test successful."
+          echo "Docker container test successful."
 
           docker stop nova-test
           docker rm nova-test
 
       # --------------------------------------------------------
-      # Push Latest Image
+      # Push latest
       # --------------------------------------------------------
 
       - name: Push latest image
         run: |
-          echo "======================================"
-          echo "Pushing latest image"
-          echo "======================================"
-
-          docker push $IMAGE_NAME:latest
-
-          echo "Latest image pushed successfully."
+          docker push "$IMAGE_NAME:latest"
 
       # --------------------------------------------------------
-      # Push Versioned Image
+      # Push version
       # --------------------------------------------------------
 
       - name: Push versioned image
         run: |
-          echo "======================================"
-          echo "Pushing versioned image"
-          echo "======================================"
+          docker push "$IMAGE_NAME:${GITHUB_SHA::7}"
 
-          docker push $IMAGE_NAME:${GITHUB_SHA::7}
+      # --------------------------------------------------------
+      # Logout
+      # --------------------------------------------------------
 
-          echo "Versioned image pushed successfully."
+      - name: Logout Docker Hub
+        run: |
+          docker logout docker.io || true
 
 
   # ============================================================
-  # CD - DEPLOY TO EC2
+  # DEPLOY TO EC2
   # ============================================================
 
   deploy:
     name: Deploy to EC2
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
 
     steps:
 
-      # --------------------------------------------------------
-      # SSH INTO EC2
-      # --------------------------------------------------------
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
-      - name: Deploy application to EC2
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.2
-
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
@@ -240,77 +208,62 @@ jobs:
 
             set -e
 
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/nova-ai:latest"
+            CONTAINER="nova-ai"
+
             echo "======================================"
             echo "NOVA AI DEPLOYMENT"
             echo "======================================"
 
             # --------------------------------------------------
-            # Configuration
+            # Docker check
             # --------------------------------------------------
 
-            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/nova-ai:latest"
-            CONTAINER="nova-ai"
-
-            echo "Image: $IMAGE"
-            echo "Container: $CONTAINER"
-
-            # --------------------------------------------------
-            # Check Docker
-            # --------------------------------------------------
-
-            echo ""
-            echo "Checking Docker..."
-
+            echo "Docker version:"
             docker --version
 
             # --------------------------------------------------
-            # Login to Docker Hub
+            # Login Docker Hub
             # --------------------------------------------------
 
-            echo ""
             echo "Logging into Docker Hub..."
 
-            echo "${{ secrets.DOCKERHUB_PASSWORD }}" | \
+            printf '%s' '${{ secrets.DOCKERHUB_PASSWORD }}' | \
               docker login docker.io \
-              --username "${{ secrets.DOCKERHUB_USERNAME }}" \
+              --username '${{ secrets.DOCKERHUB_USERNAME }}' \
               --password-stdin
 
             echo "Docker Hub login successful."
 
             # --------------------------------------------------
-            # Pull Latest Image
+            # Pull latest image
             # --------------------------------------------------
 
-            echo ""
-            echo "Pulling latest NOVA AI image..."
+            echo "Pulling image:"
+            echo "$IMAGE"
 
             docker pull "$IMAGE"
 
-            echo "Image pulled successfully."
-
             # --------------------------------------------------
-            # Stop Existing Container
+            # Stop old container
             # --------------------------------------------------
 
-            echo ""
-            echo "Stopping existing container..."
+            echo "Stopping old container..."
 
             docker stop "$CONTAINER" 2>/dev/null || true
 
             # --------------------------------------------------
-            # Remove Existing Container
+            # Remove old container
             # --------------------------------------------------
 
-            echo ""
-            echo "Removing existing container..."
+            echo "Removing old container..."
 
             docker rm "$CONTAINER" 2>/dev/null || true
 
             # --------------------------------------------------
-            # Start New Container
+            # Start new container
             # --------------------------------------------------
 
-            echo ""
             echo "Starting new container..."
 
             docker run -d \
@@ -319,85 +272,57 @@ jobs:
               -p 80:80 \
               "$IMAGE"
 
-            echo "New container started."
-
             # --------------------------------------------------
-            # Wait for Nginx
+            # Wait
             # --------------------------------------------------
 
-            echo ""
-            echo "Waiting for application..."
+            echo "Waiting for Nginx..."
 
             sleep 5
 
             # --------------------------------------------------
-            # Check Container
-            # --------------------------------------------------
-
-            echo ""
-            echo "Checking container status..."
-
-            docker ps --filter "name=$CONTAINER"
-
-            # --------------------------------------------------
-            # Check Container Is Running
+            # Container check
             # --------------------------------------------------
 
             if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-              echo "ERROR: Container is not running."
 
-              echo ""
+              echo "ERROR: Container failed to start."
+
               echo "Container logs:"
-              docker logs "$CONTAINER"
+              docker logs "$CONTAINER" || true
 
               exit 1
+
             fi
 
             echo "Container is running."
 
             # --------------------------------------------------
-            # Test Application
+            # Application test
             # --------------------------------------------------
 
-            echo ""
-            echo "Testing Nginx..."
+            echo "Testing application..."
 
             curl --fail http://localhost
 
             echo ""
-            echo "Application is responding successfully."
+            echo "NOVA AI is responding successfully."
 
             # --------------------------------------------------
-            # Cleanup Old Docker Images
+            # Cleanup
             # --------------------------------------------------
-
-            echo ""
-            echo "Cleaning unused Docker images..."
 
             docker image prune -f
 
             # --------------------------------------------------
-            # Logout Docker Hub
+            # Logout
             # --------------------------------------------------
-
-            echo ""
-            echo "Logging out of Docker Hub..."
 
             docker logout docker.io || true
 
-            # --------------------------------------------------
-            # Final Status
-            # --------------------------------------------------
-
             echo ""
             echo "======================================"
-            echo "NOVA AI DEPLOYMENT SUCCESSFUL"
+            echo "DEPLOYMENT SUCCESSFUL"
             echo "======================================"
-
-            echo ""
-            echo "Running containers:"
 
             docker ps
-
-            echo ""
-            echo "Deployment completed successfully."
